@@ -22,13 +22,33 @@ package tunny
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 //------------------------------------------------------------------------------
+
+func TestPoolTyped(t *testing.T) {
+	f := func(v int) int { return v * 2 }
+	ErrTesting := fmt.Errorf("testing")
+
+	pool := NewFunc(10, func(v int) (out int, err error) { return f(v), ErrTesting })
+	var (
+		res int
+		err error
+	)
+
+	for i := 1; i < 100; i *= 10 {
+		res, err = pool.Process(i)
+		assert.Equal(t, ErrTesting, err)
+		assert.Equal(t, f(i), res)
+	}
+}
 
 func TestPoolSizeAdjustment(t *testing.T) {
 	pool := NewFunc(10, func(interface{}) (interface{}, error) { return "foo", nil })
@@ -143,7 +163,7 @@ func TestFuncJobCtx(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
 		defer cancel()
-		
+
 		_, act := pool.ProcessCtx(ctx, 10)
 		if exp := context.DeadlineExceeded; exp != act {
 			t.Errorf("Wrong error returned: %v != %v", act, exp)
@@ -152,7 +172,7 @@ func TestFuncJobCtx(t *testing.T) {
 }
 
 func TestCallbackJob(t *testing.T) {
-	pool := NewCallback[interface{}, interface{}](10)
+	pool := NewCallback[interface{}, interface{}, error](10)
 	defer pool.Close()
 
 	var counter int32
@@ -285,7 +305,7 @@ func (m *mockWorker) Terminate() {
 }
 
 func TestCustomWorker(t *testing.T) {
-	pool := New(1, func() Worker[interface{}, interface{}] {
+	pool := New(1, func() Worker[interface{}, interface{}, error] {
 		return &mockWorker{
 			blockProcChan:  make(chan struct{}),
 			blockReadyChan: make(chan struct{}),
@@ -331,7 +351,7 @@ func TestCustomWorker(t *testing.T) {
 //------------------------------------------------------------------------------
 
 func BenchmarkFuncJob(b *testing.B) {
-	pool := NewFunc(10, func(in interface{})(interface{}, error) {
+	pool := NewFunc(10, func(in interface{}) (interface{}, error) {
 		intVal := in.(int)
 		return intVal * 2, nil
 	})

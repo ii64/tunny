@@ -45,9 +45,9 @@ var (
 //
 // Each of these duties are implemented as a single method and can be averted
 // when not needed by simply implementing an empty func.
-type Worker[T, U any] interface {
+type Worker[T, U any, E error] interface {
 	// Process will synchronously perform a job and return the result.
-	Process(T) (U, error)
+	Process(T) (U, E)
 
 	// BlockUntilReady is called before each job is processed and must block the
 	// calling goroutine until the Worker is ready to process the next job.
@@ -66,50 +66,50 @@ type Worker[T, U any] interface {
 
 // closureWorker is a minimal Worker implementation that simply wraps a
 // func(interface{}) interface{}
-type closureWorker[T, U any] struct {
-	processor func(T) (U, error)
+type closureWorker[T, U any, E error] struct {
+	processor func(T) (U, E)
 }
 
-func (w *closureWorker[T, U]) Process(payload T) (U, error) {
+func (w *closureWorker[T, U, E]) Process(payload T) (U, E) {
 	return w.processor(payload)
 }
 
-func (w *closureWorker[T, U]) BlockUntilReady() {}
-func (w *closureWorker[T, U]) Interrupt()       {}
-func (w *closureWorker[T, U]) Terminate()       {}
+func (w *closureWorker[T, U, E]) BlockUntilReady() {}
+func (w *closureWorker[T, U, E]) Interrupt()       {}
+func (w *closureWorker[T, U, E]) Terminate()       {}
 
 //------------------------------------------------------------------------------
 
 // callbackWorker is a minimal Worker implementation that attempts to cast
 // each job into func() and either calls it if successful or returns
 // ErrJobNotFunc.
-type callbackWorker[T, U any] struct{}
+type callbackWorker[T, U any, E error] struct{}
 
-func (w *callbackWorker[T, U]) Process(payload T) (ret U, err error) {
-	f, ok := (interface{})(payload).(func())
+func (w *callbackWorker[T, U, E]) Process(payload T) (ret U, err E) {
+	f, ok := interface{}(payload).(func())
 	if !ok {
-		err = ErrJobNotFunc
+		setError(&err, ErrJobNotFunc)
 		return
 	}
 	f()
 	return
 }
 
-func (w *callbackWorker[T, U]) BlockUntilReady() {}
-func (w *callbackWorker[T, U]) Interrupt()       {}
-func (w *callbackWorker[T, U]) Terminate()       {}
+func (w *callbackWorker[T, U, E]) BlockUntilReady() {}
+func (w *callbackWorker[T, U, E]) Interrupt()       {}
+func (w *callbackWorker[T, U, E]) Terminate()       {}
 
 //------------------------------------------------------------------------------
 
 // Pool is a struct that manages a collection of workers, each with their own
 // goroutine. The Pool can initialize, expand, compress and close the workers,
 // as well as processing jobs with the workers synchronously.
-type Pool[T, U any] struct {
+type Pool[T, U any, E error] struct {
 	queuedJobs int64
 
-	ctor    func() Worker[T, U]
-	workers []*workerWrapper[T, U]
-	reqChan chan workRequest[T, U]
+	ctor    func() Worker[T, U, E]
+	workers []*workerWrapper[T, U, E]
+	reqChan chan workRequest[T, U, E]
 
 	workerMut sync.Mutex
 }
@@ -118,10 +118,10 @@ type Pool[T, U any] struct {
 // provide a constructor function that creates new Worker types and when you
 // change the size of the pool the constructor will be called to create each new
 // Worker.
-func New[T, U any](n int, ctor func() Worker[T, U]) *Pool[T, U] {
-	p := &Pool[T, U]{
+func New[T, U any, E error](n int, ctor func() Worker[T, U, E]) *Pool[T, U, E] {
+	p := &Pool[T, U, E]{
 		ctor:    ctor,
-		reqChan: make(chan workRequest[T, U]),
+		reqChan: make(chan workRequest[T, U, E]),
 	}
 	p.SetSize(n)
 
@@ -130,9 +130,9 @@ func New[T, U any](n int, ctor func() Worker[T, U]) *Pool[T, U] {
 
 // NewFunc creates a new Pool of workers where each worker will process using
 // the provided func.
-func NewFunc[T, U any](n int, f func(T) (U, error)) *Pool[T, U] {
-	return New(n, func() Worker[T, U] {
-		return &closureWorker[T, U]{
+func NewFunc[T, U any, E error](n int, f func(T) (U, E)) *Pool[T, U, E] {
+	return New(n, func() Worker[T, U, E] {
+		return &closureWorker[T, U, E]{
 			processor: f,
 		}
 	})
@@ -140,9 +140,9 @@ func NewFunc[T, U any](n int, f func(T) (U, error)) *Pool[T, U] {
 
 // NewCallback creates a new Pool of workers where workers cast the job payload
 // into a func() and runs it, or returns ErrNotFunc if the cast failed.
-func NewCallback[T, U any](n int) *Pool[T, U] {
-	return New(n, func() Worker[T, U] {
-		return &callbackWorker[T, U]{}
+func NewCallback[T, U any, E error](n int) *Pool[T, U, E] {
+	return New(n, func() Worker[T, U, E] {
+		return &callbackWorker[T, U, E]{}
 	})
 }
 
@@ -151,7 +151,7 @@ func NewCallback[T, U any](n int) *Pool[T, U] {
 // Process will use the Pool to process a payload and synchronously return the
 // result. Process can be called safely by any goroutines, but will panic if the
 // Pool has been stopped.
-func (p *Pool[T, U]) Process(payload T) (U, error) {
+func (p *Pool[T, U, E]) Process(payload T) (U, error) {
 	atomic.AddInt64(&p.queuedJobs, 1)
 
 	request, open := <-p.reqChan
@@ -161,12 +161,12 @@ func (p *Pool[T, U]) Process(payload T) (U, error) {
 
 	request.jobChan <- struct {
 		data T
-		err  error
-	}{payload, nil}
+		err  E
+	}{data: payload}
 
 	var payload2 struct {
 		data U
-		err  error
+		err  E
 	}
 	payload2, open = <-request.retChan
 	if !open {
@@ -181,53 +181,53 @@ func (p *Pool[T, U]) Process(payload T) (U, error) {
 // the result. If the timeout occurs before the job has finished the worker will
 // be interrupted and ErrJobTimedOut will be returned. ProcessTimed can be
 // called safely by any goroutines.
-func (p *Pool[T, U]) ProcessTimed(
+func (p *Pool[T, U, E]) ProcessTimed(
 	payload T,
 	timeout time.Duration,
-) (ret U, err error) {
+) (ret U, err E) {
 	atomic.AddInt64(&p.queuedJobs, 1)
 	defer atomic.AddInt64(&p.queuedJobs, -1)
 
 	tout := time.NewTimer(timeout)
 
-	var request workRequest[T, U]
+	var request workRequest[T, U, E]
 	var open bool
 
 	select {
 	case request, open = <-p.reqChan:
 		if !open {
-			err = ErrPoolNotRunning
+			setError(&err, ErrPoolNotRunning)
 			return
 		}
 	case <-tout.C:
-		err = ErrJobTimedOut
+		setError(&err, ErrJobTimedOut)
 		return
 	}
 
 	select {
 	case request.jobChan <- struct {
 		data T
-		err  error
-	}{payload, nil}:
+		err  E
+	}{data: payload}:
 	case <-tout.C:
 		request.interruptFunc()
-		err = ErrJobTimedOut
+		setError(&err, ErrJobTimedOut)
 		return
 	}
 
 	var payload2 struct {
 		data U
-		err  error
+		err  E
 	}
 	select {
 	case payload2, open = <-request.retChan:
 		if !open {
-			err = ErrWorkerClosed
+			setError(&err, ErrWorkerClosed)
 			return
 		}
 	case <-tout.C:
 		request.interruptFunc()
-		err = ErrJobTimedOut
+		setError(&err, ErrJobTimedOut)
 		return
 	}
 
@@ -239,11 +239,11 @@ func (p *Pool[T, U]) ProcessTimed(
 // the result. If the context cancels before the job has finished the worker will
 // be interrupted and ErrJobTimedOut will be returned. ProcessCtx can be
 // called safely by any goroutines.
-func (p *Pool[T, U]) ProcessCtx(ctx context.Context, payload T) (ret U, err error) {
+func (p *Pool[T, U, E]) ProcessCtx(ctx context.Context, payload T) (ret U, err error) {
 	atomic.AddInt64(&p.queuedJobs, 1)
 	defer atomic.AddInt64(&p.queuedJobs, -1)
 
-	var request workRequest[T, U]
+	var request workRequest[T, U, E]
 	var open bool
 
 	select {
@@ -260,8 +260,8 @@ func (p *Pool[T, U]) ProcessCtx(ctx context.Context, payload T) (ret U, err erro
 	select {
 	case request.jobChan <- struct {
 		data T
-		err  error
-	}{payload, nil}:
+		err  E
+	}{data: payload}:
 	case <-ctx.Done():
 		request.interruptFunc()
 		err = ctx.Err()
@@ -270,7 +270,7 @@ func (p *Pool[T, U]) ProcessCtx(ctx context.Context, payload T) (ret U, err erro
 
 	var payload2 struct {
 		data U
-		err  error
+		err  E
 	}
 	select {
 	case payload2, open = <-request.retChan:
@@ -287,14 +287,14 @@ func (p *Pool[T, U]) ProcessCtx(ctx context.Context, payload T) (ret U, err erro
 }
 
 // QueueLength returns the current count of pending queued jobs.
-func (p *Pool[T, U]) QueueLength() int64 {
+func (p *Pool[T, U, E]) QueueLength() int64 {
 	return atomic.LoadInt64(&p.queuedJobs)
 }
 
 // SetSize changes the total number of workers in the Pool. This can be called
 // by any goroutine at any time unless the Pool has been stopped, in which case
 // a panic will occur.
-func (p *Pool[T, U]) SetSize(n int) {
+func (p *Pool[T, U, E]) SetSize(n int) {
 	p.workerMut.Lock()
 	defer p.workerMut.Unlock()
 
@@ -324,7 +324,7 @@ func (p *Pool[T, U]) SetSize(n int) {
 }
 
 // GetSize returns the current size of the pool.
-func (p *Pool[T, U]) GetSize() int {
+func (p *Pool[T, U, E]) GetSize() int {
 	p.workerMut.Lock()
 	defer p.workerMut.Unlock()
 
@@ -332,9 +332,24 @@ func (p *Pool[T, U]) GetSize() int {
 }
 
 // Close will terminate all workers and close the job channel of this Pool.
-func (p *Pool[T, U]) Close() {
+func (p *Pool[T, U, E]) Close() {
 	p.SetSize(0)
 	close(p.reqChan)
 }
 
 //------------------------------------------------------------------------------
+
+func setError[U error](ep *U, err error) {
+	switch ep := interface{}(ep).(type) {
+	case *error:
+		*ep = err
+	case *bool:
+		// ok || !ok
+		*ep = err == nil
+	case *string:
+		if err != nil {
+			*ep = err.Error()
+		}
+	default:
+	}
+}

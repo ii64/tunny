@@ -24,17 +24,17 @@ package tunny
 
 // workRequest is a struct containing context representing a workers intention
 // to receive a work payload.
-type workRequest[T, U any] struct {
+type workRequest[T, U any, E error] struct {
 	// jobChan is used to send the payload to this worker.
 	jobChan chan<- struct {
 		data T
-		err  error
+		err  E
 	}
 
 	// retChan is used to read the result from this worker.
 	retChan <-chan struct {
 		data U
-		err  error
+		err  E
 	}
 
 	// interruptFunc can be called to cancel a running job. When called it is no
@@ -47,12 +47,12 @@ type workRequest[T, U any] struct {
 // workerWrapper takes a Worker implementation and wraps it within a goroutine
 // and channel arrangement. The workerWrapper is responsible for managing the
 // lifetime of both the Worker and the goroutine.
-type workerWrapper[T, U any] struct {
-	worker        Worker[T, U]
+type workerWrapper[T, U any, E error] struct {
+	worker        Worker[T, U, E]
 	interruptChan chan struct{}
 
 	// reqChan is NOT owned by this type, it is used to send requests for work.
-	reqChan chan<- workRequest[T, U]
+	reqChan chan<- workRequest[T, U, E]
 
 	// closeChan can be closed in order to cleanly shutdown this worker.
 	closeChan chan struct{}
@@ -61,11 +61,11 @@ type workerWrapper[T, U any] struct {
 	closedChan chan struct{}
 }
 
-func newWorkerWrapper[T, U any](
-	reqChan chan<- workRequest[T, U],
-	worker Worker[T, U],
-) *workerWrapper[T, U] {
-	w := workerWrapper[T, U]{
+func newWorkerWrapper[T, U any, E error](
+	reqChan chan<- workRequest[T, U, E],
+	worker Worker[T, U, E],
+) *workerWrapper[T, U, E] {
+	w := workerWrapper[T, U, E]{
 		worker:        worker,
 		interruptChan: make(chan struct{}),
 		reqChan:       reqChan,
@@ -80,18 +80,18 @@ func newWorkerWrapper[T, U any](
 
 //------------------------------------------------------------------------------
 
-func (w *workerWrapper[T, U]) interrupt() {
+func (w *workerWrapper[T, U, E]) interrupt() {
 	close(w.interruptChan)
 	w.worker.Interrupt()
 }
 
-func (w *workerWrapper[T, U]) run() {
+func (w *workerWrapper[T, U, E]) run() {
 	jobChan, retChan := make(chan struct {
 		data T
-		err  error
+		err  E
 	}), make(chan struct {
 		data U
-		err  error
+		err  E
 	})
 	defer func() {
 		w.worker.Terminate()
@@ -103,7 +103,7 @@ func (w *workerWrapper[T, U]) run() {
 		// NOTE: Blocking here will prevent the worker from closing down.
 		w.worker.BlockUntilReady()
 		select {
-		case w.reqChan <- workRequest[T, U]{
+		case w.reqChan <- workRequest[T, U, E]{
 			jobChan:       jobChan,
 			retChan:       retChan,
 			interruptFunc: w.interrupt,
@@ -114,7 +114,7 @@ func (w *workerWrapper[T, U]) run() {
 				select {
 				case retChan <- struct {
 					data U
-					err  error
+					err  E
 				}{
 					result, err,
 				}:
@@ -132,11 +132,11 @@ func (w *workerWrapper[T, U]) run() {
 
 //------------------------------------------------------------------------------
 
-func (w *workerWrapper[T, U]) stop() {
+func (w *workerWrapper[T, U, E]) stop() {
 	close(w.closeChan)
 }
 
-func (w *workerWrapper[T, U]) join() {
+func (w *workerWrapper[T, U, E]) join() {
 	<-w.closedChan
 }
 
